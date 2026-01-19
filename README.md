@@ -5,7 +5,7 @@ pdf.js + es6 + chatgpt
 
 
 ## 실행하기
-https://anemochore.github.io/jpub_pdf_create_index/
+https://anemochore.github.io/jpub_pdf_create_index/index_generated.html
 
 
 ## 버전
