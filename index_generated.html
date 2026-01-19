@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>목 to the 차</title>
+  <link rel="stylesheet" type="text/css" href="merong.css">
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+</head>
+
+<body>
+<script type="module" src="pdfjs-5.4.530-dist/build/pdf.mjs"></script>
+
+<div id="msg">
+  pdf 파일을 선택하거나 박스 안에 끌어다 놔유. 설정할 게 있으면 오른쪽에서 먼저 해야 함!<br/>
+  <input type="file" id="fileInput" /><br/>
+</div>
+
+<div id="setting">
+  <label for="paramPageHeader">*검색할 목차 시작 페이지 문자열</label><br/>
+  <select id="paramPageHeader" onchange="handlePageHeader(event)">
+  <option value="차 례">전문서 마스터</option>
+  <option value="기타">기타(직접 입력)</option>
+  </select>
+  <input id="paramPageHeaderStr" type="text" value="차 례"  title="paramPageHeaderStr" disabled />
+  <br/>
+  <label for="paramManualChapters">*챕터(최대 페이지) 개수 수동 지정</label> <input type="checkbox" id="paramManualChapters" onchange="handleManualChapters(event)">
+  <input id="paramManualChaptersStart" type="text" value="???"  title="paramManualChaptersStart" disabled />
+  <br/>
+  <label for="paramManualPages">*목차 페이지 수동 지정</label> <input type="checkbox" id="paramManualPages" onchange="handleManualPages(event)">
+  <input id="paramManualPagesStart" type="text" value="???"  title="paramManualPagesStart" disabled />~
+  <input id="paramManualPagesEnd" type="text" value="???"  title="paramManualPagesEnd" disabled />쪽
+  <br/>
+  <label for="paramUseTwoLevel">*챕터 대신 절 단위로 작업</label> <input type="checkbox" id="paramUseTwoLevel" />
+</div>
+
+<div style="clear: both;"></div>
+
+<pre id="output" contenteditable spellcheck="false">
+  여기에 '항목    페이지들' 형식으로 결과가 나옴(공백 네 칸으로 구분)<br/>
+  기본값은 용어 하나당 최대 페이지 개수가 챕터 수와 동일하지만(한 챕터 내 초출 위치임)
+  오른쪽에서 수동으로 수정은 가능함<br/>
+  분량이 얼마 안 되는 책이라면 챕터 대신 절 단위로 지정도 가능함<br/>
+  결과가 제대로 안 나오면 제보 바람<br/>
+  이상 26-1-19 업데이트
+</pre>
+<button id="choButton" onclick="selectTextAndCopy('output')">결과 전체 복사</button><br/>
+
+<textarea id="log" title="log">나는 로그다</textarea>
+
+<div id="longStatus"></div>
+
+<div id="info">
+  <!-- <a href="https://github.com/anemochore/HB_pdf_toc" target="_blank">깃허브 저장소(새창)</a><br/> -->
+  copyleft f.y. 2026
+</div>
+
+<script>
+  function handlePageHeader(event) {
+    if(event.target.value === "기타") {
+      document.getElementById('paramPageHeaderStr').disabled = false;
+    }
+    else {
+      document.getElementById('paramPageHeaderStr').value = event.target.value;
+      document.getElementById('paramPageHeaderStr').disabled = true;
+    }
+  }
+
+  function handleManualChapters(event) {
+    if(event.target.checked) {
+      document.getElementById('paramManualChaptersStart').value = "10";
+      document.getElementById('paramManualChaptersStart').disabled = false;
+    }
+    else {
+      document.getElementById('paramManualChaptersStart').value = "???";
+      document.getElementById('paramManualChaptersStart').disabled = true;
+    }
+  }
+
+  function handleManualPages(event) {
+    if(event.target.checked) {
+      document.getElementById('paramManualPagesStart').value = "10";
+      document.getElementById('paramManualPagesEnd').value = "1";
+      document.getElementById('paramManualPagesStart').disabled = false;
+      document.getElementById('paramManualPagesEnd').disabled = false;
+    }
+    else {
+      document.getElementById('paramManualPagesStart').value = "???";
+      document.getElementById('paramManualPagesEnd').value = "???";
+      document.getElementById('paramManualPagesStart').disabled = true;
+      document.getElementById('paramManualPagesEnd').disabled = true;
+    }
+  }
+
+  async function selectTextAndCopy(elementId) {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+
+    // 1) 화면에서 전체 선택(기존 기능 유지)
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    // 2) 실제 복사(Clipboard API 우선)
+    const text = el.textContent || '';
+    if (!text.trim()) return;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (e) {
+      // 3) fallback: execCommand('copy')
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      ta.style.top = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(ta);
+      }
+    }
+  }
+</script>
+
+<script src="app_index_v5.js"></script>
+</body>
+</html>

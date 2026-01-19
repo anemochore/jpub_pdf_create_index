@@ -1,0 +1,13 @@
+body { padding: 10px; font-family: sans-serif; }
+form { display: inline; border: 1px solid; margin:0; padding:0; }
+button { color: white; background-color: #4CAF50; border: 0; margin: 5px; padding: 5px; }
+#msg { float: left; }
+#fileInput { width: 590px; height: 45px; float: left; border: 1px dotted; margin-top: 10px; padding: 5px; }
+#output { width: 600px; height: 500px; border: 1px solid; overflow: scroll; font-size: 0.9em; margin-top: 5px; }
+#log { width: 600px; height: 90px; font-size: 0.85em; margin-top: 5px; }
+#setting { margin-left: 620px; font-size: 0.8em; color: green; }
+#paramPageHeader { width: 120px; height: 26px; }
+#paramPageHeaderStr { height: 20px; }
+#paramManualChaptersStart,#paramManualPagesStart,#paramManualPagesEnd { width: 25px; height: 20px; }
+#choButton { margin: -10px 0 25px 500px; font-size: 0.9em; }
+#info { font-size: 0.7em; }
