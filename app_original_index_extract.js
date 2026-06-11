@@ -665,7 +665,7 @@ function inferColumnLeft(lines) {
 function isManningIndexNoise(line, page) {
   const text = line.text.trim();
   if (!text) return true;
-  if (/^\d+$/.test(text) && line.y > page.height * 0.88) return true;
+  if (/^\d+$/.test(text) && line.y > page.height * 0.92) return true;
   if (/^index$/i.test(text) && line.y > page.height * 0.78) return true;
   if (/^index$/i.test(text) && line.parts.some(part => part.height >= 18)) return true;
   if (/^(numbers|symbols)$/i.test(text)) return true;
