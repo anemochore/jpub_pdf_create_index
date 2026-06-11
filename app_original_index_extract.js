@@ -397,11 +397,11 @@ async function readPageLayout(pdf, pageNum) {
     height: view[3] - view[1],
     view,
     items,
-    lines: groupItemsIntoLines(items)
+    lines: groupItemsIntoLines(items, view[2] - view[0])
   };
 }
 
-function groupItemsIntoLines(items) {
+function groupItemsIntoLines(items, pageWidth) {
   const buckets = [];
   const THRESHOLD_Y = 2.4;
 
@@ -423,20 +423,22 @@ function groupItemsIntoLines(items) {
   buckets.sort((a, b) => b.y - a.y);
   const lines = [];
   for (const bucket of buckets) {
-    lines.push.apply(lines, makeLinesFromBucket(bucket.parts, bucket.y));
+    lines.push.apply(lines, makeLinesFromBucket(bucket.parts, bucket.y, pageWidth));
   }
   return lines;
 }
 
-function makeLinesFromBucket(parts, y) {
+function makeLinesFromBucket(parts, y, pageWidth) {
   const sorted = parts.slice().sort((a, b) => a.x - b.x);
   const groups = [];
   let cur = [];
   let prevRight = null;
+  const midpoint = pageWidth / 2;
 
   for (const part of sorted) {
     const gap = prevRight == null ? 0 : part.x - prevRight;
-    if (cur.length && gap > 24) {
+    const crossesColumnGutter = cur.length && cur[0].x < midpoint && part.x >= midpoint;
+    if (cur.length && (gap > 24 || crossesColumnGutter)) {
       groups.push(cur);
       cur = [];
     }
@@ -511,18 +513,20 @@ function extractManningPageRows(page, pageBoxes, xProfile) {
   const usable = trimToPreferredBox(page.lines, pageBoxes);
   const contentLines = usable.filter(line => !isManningIndexNoise(line, page));
   const columns = splitIntoColumns(contentLines, page.width);
-  const rawRows = [];
+  const rows = [];
 
   for (const col of columns) {
+    const rawRows = [];
     for (const line of col.lines) {
       const parsed = parseIndexLine(line, col.left, xProfile);
       if (parsed) rawRows.push(parsed);
     }
+    rows.push.apply(rows, mergeWrappedRows(rawRows, xProfile));
   }
 
   return {
     rawCount: contentLines.length,
-    rows: mergeWrappedRows(rawRows, xProfile)
+    rows
   };
 }
 
