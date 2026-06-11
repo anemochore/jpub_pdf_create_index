@@ -681,7 +681,7 @@ function parseIndexLine(line, columnLeft, xProfile) {
   const text = line.text.replace(/\s+/g, ' ').trim();
   if (!text) return null;
 
-  const pageRefs = '(?:\\d+)(?:\\s*(?:,|[-–—])\\s*(?:\\d+))*(?:\\s*,)?';
+  const pageRefs = '(?:\\d+)(?:\\s*(?:,|[-–—])\\s*(?:\\d+))*\\s*(?:,|[-–—])?';
   const pageOnly = new RegExp('^' + pageRefs + '$').test(text);
   const indent = line.x - columnLeft;
   const role = classifyLineRole(indent, xProfile);
@@ -724,7 +724,7 @@ function parseIndexLine(line, columnLeft, xProfile) {
     y: line.y,
     role,
     wrapped: false,
-    pagesOpen: /,\s*$/.test(match[2]),
+    pagesOpen: /(?:,|[-–—])\s*$/.test(match[2]),
     pageOnly: false
   };
 }
@@ -774,7 +774,7 @@ function mergeWrappedRows(rows, xProfile) {
         lastPaged = merged;
         pending = null;
       } else if (lastPaged && shouldAppendPageContinuation(lastPaged, row, xProfile)) {
-        lastPaged.pages = cleanupPages(lastPaged.pages + ', ' + row.pages);
+        lastPaged.pages = appendPageContinuation(lastPaged.pages, row.pages);
         lastPaged.pagesOpen = false;
       }
       continue;
@@ -853,6 +853,15 @@ function shouldAppendPageContinuation(prev, row, xProfile) {
   const dy = Math.abs((prev.y || 0) - (row.y || 0));
   const continuationIndent = xProfile && xProfile.rel ? xProfile.rel.continuation : 24;
   return dy <= 13.2 && row.indent >= (continuationIndent - 3);
+}
+
+function appendPageContinuation(left, right) {
+  const a = cleanupPages(left);
+  const b = cleanupPages(right);
+  if (!a) return b;
+  if (!b) return a;
+  if (/[-–—]$/.test(a)) return cleanupPages(a + b);
+  return cleanupPages(a + ', ' + b);
 }
 
 function joinIndexTitleParts(left, right) {
