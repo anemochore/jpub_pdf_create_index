@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>원서 찾아보기 추출</title>
+  <link rel="stylesheet" type="text/css" href="merong.css">
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+</head>
+
+<body>
+<script type="module">
+  import * as pdfjsLib from './pdfjs-5.4.530-dist/build/pdf.mjs';
+  window.pdfjsLib = pdfjsLib;
+</script>
+
+<div id="msg">
+  원서 pdf 파일을 선택하거나 박스 안에 끌어다 놔유. 지금은 Manning Publications 인덱스 추출만 지원함.<br/>
+  <a href="original_index_extract.html?sample=manning">Manning 샘플 자동 실행</a><br/>
+  <input type="file" id="fileInput" accept="application/pdf" /><br/>
+</div>
+
+<div id="setting">
+  <label for="paramPublisher">*출판사</label><br/>
+  <select id="paramPublisher">
+    <option value="auto" selected>자동</option>
+    <option value="manning">Manning Publications</option>
+  </select>
+  <br/>
+  <label for="paramManualPages">*인덱스 페이지 수동 지정</label> <input type="checkbox" id="paramManualPages" onchange="handleManualPages(event)">
+  <input id="paramManualPagesStart" type="text" value="???" title="paramManualPagesStart" disabled />~
+  <input id="paramManualPagesEnd" type="text" value="???" title="paramManualPagesEnd" disabled />쪽
+</div>
+
+<div style="clear: both;"></div>
+
+<pre id="output" contenteditable spellcheck="false">
+  여기에 '항목 ||| 쪽수' 형식으로 결과가 나옴
+  2단계 항목은 '__ ', 3단계 항목은 '____ '가 앞에 붙음
+</pre>
+<button id="choButton" onclick="selectTextAndCopy('output')">결과 전체 복사</button><br/>
+
+<textarea id="log" title="log">나는 로그다</textarea>
+
+<div id="longStatus"></div>
+
+<div id="info">
+  copyleft f.y. 2026
+</div>
+
+<script>
+  function handleManualPages(event) {
+    if(event.target.checked) {
+      document.getElementById('paramManualPagesStart').value = "1";
+      document.getElementById('paramManualPagesEnd').value = "1";
+      document.getElementById('paramManualPagesStart').disabled = false;
+      document.getElementById('paramManualPagesEnd').disabled = false;
+    }
+    else {
+      document.getElementById('paramManualPagesStart').value = "???";
+      document.getElementById('paramManualPagesEnd').value = "???";
+      document.getElementById('paramManualPagesStart').disabled = true;
+      document.getElementById('paramManualPagesEnd').disabled = true;
+    }
+  }
+
+  async function selectTextAndCopy(elementId) {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    const text = el.textContent || '';
+    if (!text.trim()) return;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      ta.style.top = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(ta);
+      }
+    }
+  }
+</script>
+
+<script src="app_original_index_extract.js?v=20260611c"></script>
+</body>
+</html>
