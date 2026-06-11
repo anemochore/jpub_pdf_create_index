@@ -92,6 +92,7 @@ async function runPipeline(typedArray) {
 
     // 3) Build chapter ranges (book pages, not physical pages)
     const chapterRanges = buildChapterRanges(level1, level2, settings.rangeMode);
+    logChapterRanges(chapterRanges, settings.rangeMode);
 
     // Determine chapter count used for capping pages per term (defaults to parsed chapters).
     const manualChapterCount = getChapterCountOverride();
@@ -465,6 +466,20 @@ function chapterForBookPage(chapterRanges, bookPage) {
       if (r.start <= bookPage && bookPage <= r.end) return r.ch;
     }
     return null;
+  }
+
+function logChapterRanges(chapterRanges, mode) {
+    const label = mode === "section" ? "절" : "챕터";
+    if (!chapterRanges || !chapterRanges.length) {
+      logPut(label + " 시작 페이지: 감지 실패");
+      return;
+    }
+
+    logPut(label + " 시작 페이지:");
+    for (const r of chapterRanges) {
+      const title = r.title ? " " + r.title : "";
+      logPut("  " + r.ch + title + "    " + r.start + "쪽");
+    }
   }
 
 function estimateBookToPhysicalOffset(pageTexts, totalPages, level1Items, tocEnd0, level2Items) {
