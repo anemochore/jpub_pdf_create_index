@@ -24,18 +24,17 @@ document.getElementById('fileInput').addEventListener('change', handleFileSelect
     e.stopPropagation();
     box.style.borderStyle = 'dotted';
     const f = (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) || null;
-    if (!f) return;
-    const fileReader = new FileReader();
-    fileReader.readAsArrayBuffer(f);
-    fileReader.onload = function() {
-      const typedArray = new Uint8Array(this.result);
-      runPipeline(typedArray);
-    };
+    runPipelineForFile(f);
   });
 })();
 
 function handleFileSelect(e) {
   const f = e.target.files[0];
+  if (!f) return;
+  runPipelineForFile(f);
+}
+
+function runPipelineForFile(f) {
   if (!f) return;
   const fileReader = new FileReader();
   fileReader.readAsArrayBuffer(f);
@@ -45,15 +44,16 @@ function handleFileSelect(e) {
   };
 }
 
+const DEFAULT_SETTINGS = {
+  maxPagesToScan: 2000,
+  maxTocScanPages: 60,
+  tocEndMark: "찾아보기",
+  dropExact: new Set(["CHAPTER", "개요", "요약"]),
+  onePagePerChapter: true
+};
+
 async function runPipeline(typedArray) {
-  // Settings (kept simple: user asked to keep UI stable)
-  const MAX_PAGES_TO_SCAN = 2000; // safety cap for huge PDFs (still scans all if smaller)
-  const MAX_TOC_SCAN_PAGES = 60;  // scan first N pages to find TOC unless manual is set
-  const TOC_END_MARK = "찾아보기"; // if present near TOC end
-
-  const DROP_EXACT = new Set(["CHAPTER", "개요", "요약"]); // minimal stopwords per user guidance
-  const ONE_PAGE_PER_CHAPTER = true;
-
+  const settings = readSettings();
   const OUTPUT = document.getElementById('output');
   OUTPUT.innerHTML = "기다리라우...";
   logPut(); // clear log
@@ -62,12 +62,15 @@ async function runPipeline(typedArray) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdfjs-5.4.530-dist/build/pdf.worker.mjs';
   const loadingTask = pdfjsLib.getDocument({ data: typedArray });
 
-  loadingTask.promise.then(async function(pdf) {
-    const totalPages = Math.min(pdf.numPages, MAX_PAGES_TO_SCAN);
+  try {
+    const pdf = await loadingTask.promise;
+    const totalPages = Math.min(pdf.numPages, settings.maxPagesToScan);
     logPut("PDF 로드 완료. 전체 페이지: " + pdf.numPages + " (이번 실행 스캔: " + totalPages + ")");
 
+    const textCache = createPageTextCache(pdf, totalPages);
+
     // 1) Identify TOC page range
-    const [tocStart, tocEnd] = await findTocRange(pdf, totalPages, MAX_TOC_SCAN_PAGES, TOC_END_MARK);
+    const [tocStart, tocEnd] = await findTocRange(textCache, totalPages, settings);
     if (tocStart === null) {
       OUTPUT.innerHTML = "목차(차례) 페이지를 찾지 못했음. 오른쪽에서 수동 지정(목차 페이지 수동 지정) 체크 후 재시도 ㄱㄱ.";
       return;
@@ -85,11 +88,10 @@ async function runPipeline(typedArray) {
     }
     logPut("목차 파싱: 1단계 " + level1.length + "개, 2단계 " + level2.length + "개");
 
+    const pageTexts = await textCache.loadAll();
+
     // 3) Build chapter ranges (book pages, not physical pages)
-    const useTwoLevel = document.getElementById("paramUseTwoLevel")?.checked;
-    const rangeSource = useTwoLevel ? level2 : level1;
-    const chapterRanges = buildChapterRanges(rangeSource, totalPages);
-    //const chapterRanges = buildChapterRanges(level1, level2);
+    const chapterRanges = buildChapterRanges(level1, level2, settings.rangeMode);
 
     // Determine chapter count used for capping pages per term (defaults to parsed chapters).
     const manualChapterCount = getChapterCountOverride();
@@ -104,82 +106,34 @@ async function runPipeline(typedArray) {
         logPut("경고: 챕터 수 수동 지정이 체크되어 있으나 값이 올바르지 않아 자동 감지를 사용함");
       }
     }
-    // 4) Build physical->book page mapping using PDF page labels if available (best, non-heuristic)
-    let physicalToBook = new Array(totalPages + 1).fill(null);
-    let usedLabels = false;
-
-    try {
-      if (typeof pdf.getPageLabels === 'function') {
-        const labels = await pdf.getPageLabels(); // length == pdf.numPages, 0-indexed
-        if (labels && labels.length) {
-          usedLabels = true;
-          for (let p = 1; p <= totalPages; p++) {
-            const lab = labels[p - 1];
-            if (!lab) continue;
-            const mNum = String(lab).match(/^\s*(\d{1,6})\s*$/);
-            if (mNum) physicalToBook[p] = parseInt(mNum[1], 10);
-          }
-        }
-      }
-    } catch (e) {
-      // ignore, will fall back
-    }
-
-    /*
-    //고려하지 않음
-    let offset = 0;
-    if (!usedLabels) {
-      offset = await estimateBookToPhysicalOffset(pdf, totalPages, level1, tocEnd, level2);
-      for (let p = 1; p <= totalPages; p++) {
-        const bp = physicalToBook[p];
-        if (bp > 0) physicalToBook[p] = bp;
-      }
-      logPut("페이지 오프셋 추정(라벨 없음): book_page = physical_page - " + offset);
-    } else {
-    */
-      // Log label-derived mapping sanity
-      let firstPhys = null, firstBook = null, lastPhys = null, lastBook = null;
-      for (let p = 1; p <= totalPages; p++) {
-        if (physicalToBook[p] != null) { firstPhys = p; firstBook = physicalToBook[p]; break; }
-      }
-      for (let p = totalPages; p >= 1; p--) {
-        if (physicalToBook[p] != null) { lastPhys = p; lastBook = physicalToBook[p]; break; }
-      }
-      logPut("페이지 라벨 사용: 물리 " + firstPhys + "쪽 -> 본문 " + firstBook + " / 물리 " + lastPhys + "쪽 -> 본문 " + lastBook);
-    //}
+    // 4) Build physical->book page mapping.
+    const pageMapResult = await buildPhysicalToBookMap(pdf, totalPages, pageTexts, level1, level2, tocEnd);
+    const physicalToBook = pageMapResult.physicalToBook;
+    logPageMapSummary(pageMapResult);
 
     // 5) Extract seed terms from TOC titles (level 2 titles)
-    const tocTerms = extractTermsFromTocTitles(level2, DROP_EXACT);
+    const tocTerms = extractTermsFromTocTitles(level2, settings.dropExact);
     logPut("TOC 기반 시드 용어: " + tocTerms.length + "개");
 
     // 6) Extract conservative tech tokens from body (English-like tokens only)
-    const techTerms = await extractTechTokensFromBody(pdf, totalPages, physicalToBook, DROP_EXACT);
+    const techTerms = extractTechTokensFromBody(pageTexts, totalPages, physicalToBook, settings.dropExact);
     logPut("본문 기반 영문 기술 토큰: " + techTerms.length + "개");
 
-    /*
-    // 국문 후보를 본문에서 “제한적으로” 뽑음(빈도 기반 + 패턴 기반 필터)
-    const koreanTerms = await extractKoreanPhrasesFromBody(pdf, totalPages, physicalToBook, DROP_EXACT);
-    */
-
     // 국문(영문) / 영문(국문) 패턴
-    const parenKoreanTerms = await extractKoreanFromParentheticalPairs(pdf, totalPages, physicalToBook, DROP_EXACT);
+    const parenKoreanTerms = extractKoreanFromParentheticalPairs(pageTexts, totalPages, physicalToBook, settings.dropExact);
 
     // 7) Merge terms, dedupe
-    const allTerms = dedupeTerms(tocTerms.concat(techTerms).concat(parenKoreanTerms), DROP_EXACT);
-    //const allTerms = dedupeTerms(parenKoreanTerms, DROP_EXACT);  //dev
+    const allTerms = dedupeTerms(tocTerms.concat(techTerms).concat(parenKoreanTerms), settings.dropExact);
     logPut("최종 용어 후보(중복 등 제거 후): " + allTerms.length + "개");
 
     // terms 생성/정제 끝난 직후
-    const terms = allTerms
-    .filter(t => !shouldDropTrailingParticle(t))
-    .filter(t => !isGenericQuantifierPhrase(t))
-    .filter(t => !shouldDropDanglingModifier(t));
+    const terms = allTerms.filter(t => isUsefulTerm(t, settings.dropExact));
     logPut("최종 용어 후보(2차 조사 제거 후): " + terms.length + "개");
 
     // 8) Page matching (exact contains) and compress to earliest per chapter
-    const indexLines = await buildIndexLines(pdf, totalPages, terms, physicalToBook, chapterRanges, {
+    const indexLines = buildIndexLines(pageTexts, totalPages, terms, physicalToBook, chapterRanges, {
       maxPagesPerTerm: (chapterCount > 0 ? chapterCount : 11),
-      onePagePerChapter: ONE_PAGE_PER_CHAPTER
+      onePagePerChapter: settings.onePagePerChapter
     });
 
     // 9) Render output (typeset friendly)
@@ -188,20 +142,49 @@ async function runPipeline(typedArray) {
       const tb = b.split("    ")[0];
       return indexSortComparator(ta, tb);
     });
-    //OUTPUT.innerHTML = htmlEscape(indexLines.join("\n"));
     OUTPUT.textContent = indexLines.join("\n");
     logPut("완료! 결과 줄 수: " + indexLines.length);
     logPut("팁: '결과 전체 복사' 버튼으로 전체 복사 가능");
-  }).catch(function(err) {
-    //OUTPUT.innerHTML = "오류: " + htmlEscape(String(err));
+  } catch (err) {
     OUTPUT.textContent = "오류: " + String(err);
-  });
+  }
+}
 
-  // -----------------------------
-  // Pipeline helpers
-  // -----------------------------
+// -----------------------------
+// Pipeline helpers
+// -----------------------------
 
-  function indexSortComparator(a, b) {
+function readSettings() {
+  return {
+    ...DEFAULT_SETTINGS,
+    rangeMode: document.getElementById("paramUseTwoLevel")?.checked ? "section" : "chapter"
+  };
+}
+
+function createPageTextCache(pdf, totalPages) {
+  const pageTexts = new Array(totalPages + 1);
+
+  return {
+    async get(pageNum1) {
+      if (pageTexts[pageNum1] == null) {
+        pageTexts[pageNum1] = await getPageText(pdf, pageNum1);
+      }
+      return pageTexts[pageNum1];
+    },
+
+    async loadAll() {
+      logPut("본문 텍스트 캐시 생성 중...");
+      for (let p = 1; p <= totalPages; p++) {
+        if (pageTexts[p] == null) pageTexts[p] = await getPageText(pdf, p);
+        if (p % 25 === 0) logPut("... " + p + "쪽 캐시 완료");
+      }
+      logPut("본문 텍스트 캐시 완료.");
+      return pageTexts;
+    }
+  };
+}
+
+function indexSortComparator(a, b) {
     const ta = a.term || a;
     const tb = b.term || b;
 
@@ -248,7 +231,7 @@ async function runPipeline(typedArray) {
     }
   }
 
-  function shouldDropTrailingParticle(term) {
+function shouldDropTrailingParticle(term) {
     if (!term || term.length < 2) return false;
     const t = term.trim();
 
@@ -266,7 +249,7 @@ async function runPipeline(typedArray) {
     return false;
   }
 
-  function isGenericQuantifierPhrase(t) {
+function isGenericQuantifierPhrase(t) {
     const s = t.trim();
 
     // 1) 단독/짧은 형태
@@ -282,12 +265,22 @@ async function runPipeline(typedArray) {
     return false;
   }
 
-  function shouldDropDanglingModifier(term) {
+function shouldDropDanglingModifier(term) {
     const t = term.trim();
     return /(다른|위한|대한|통한|같은|관련|관련된|이외의|등의)$/.test(t);
   }
 
-  async function findTocRange(pdf, totalPages, maxScanPages, tocEndMark) {
+function isUsefulTerm(term, dropExact) {
+    const t = normalizeTerm(term);
+    if (!t) return false;
+    if (dropExact && dropExact.has(t)) return false;
+    if (shouldDropTrailingParticle(t)) return false;
+    if (isGenericQuantifierPhrase(t)) return false;
+    if (shouldDropDanglingModifier(t)) return false;
+    return true;
+  }
+
+async function findTocRange(textCache, totalPages, settings) {
     const IS_MANUAL = document.getElementById('paramManualPages').checked;
     if (IS_MANUAL) {
       let s = document.getElementById('paramManualPagesStart').value;
@@ -306,12 +299,12 @@ async function runPipeline(typedArray) {
     }
 
     const PAGE_HEADER = document.getElementById('paramPageHeaderStr').value;
-    const scanEnd = Math.min(totalPages, maxScanPages);
+    const scanEnd = Math.min(totalPages, settings.maxTocScanPages);
 
     logPut("목차 자동 탐색: 1~" + scanEnd + "쪽에서 '" + PAGE_HEADER + "' 검색 중...");
     let tocStart = null;
     for (let p = 1; p <= scanEnd; p++) {
-      const txt = await getPageText(pdf, p);
+      const txt = await textCache.get(p);
       if (txt.indexOf(PAGE_HEADER) > -1) {
         tocStart = p - 1; // 0-index
         logPut("목차 시작 페이지 후보 발견: " + p + "쪽");
@@ -323,14 +316,14 @@ async function runPipeline(typedArray) {
     // TOC end heuristics: stop when (a) blank page, (b) page containing tocEndMark, or (c) near max scan
     let tocEnd = tocStart;
     for (let p0 = tocStart; p0 < Math.min(totalPages, tocStart + 50); p0++) {
-      const txt = await getPageText(pdf, p0 + 1);
+      const txt = await textCache.get(p0 + 1);
       const stripped = txt.replace(/\s+/g, "");
       if (!stripped) { // blank-ish
         tocEnd = p0 - 1;
         break;
       }
       tocEnd = p0;
-      if (txt.indexOf(tocEndMark) > -1) {
+      if (txt.indexOf(settings.tocEndMark) > -1) {
         tocEnd = p0;
         break;
       }
@@ -338,7 +331,7 @@ async function runPipeline(typedArray) {
     return [tocStart, tocEnd];
   }
 
-  async function parseTocLevel1And2(pdf, tocStart, tocEnd) {
+async function parseTocLevel1And2(pdf, tocStart, tocEnd) {
     const items = [];
     for (let p0 = tocStart; p0 <= tocEnd; p0++) {
       logPut("목차 파싱 중: " + (p0 + 1) + "쪽");
@@ -361,7 +354,7 @@ async function runPipeline(typedArray) {
     return items.filter(x => x.title && x.page && x.page > 0);
   }
 
-  function parseTocLine(rawLine) {
+function parseTocLine(rawLine) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) return null;
 
@@ -378,7 +371,7 @@ async function runPipeline(typedArray) {
     if (mChap) {
       return { level: 1, number: mChap[1], title: mChap[2].trim(), page: page };
     }
-const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
+    const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     if (m2) {
       return { level: 2, number: m2[1], title: m2[2].trim(), page: page };
     }
@@ -391,7 +384,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return null;
   }
 
-  function groupItemsIntoLines(items) {
+function groupItemsIntoLines(items) {
     const THRESHOLD_DY = 2.5;
     const buckets = [];
     for (const it of items) {
@@ -437,11 +430,11 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return merged;
   }
 
-  function buildChapterRanges(level1Items, level2Items) {
-    // Prefer explicit level1 items (best). If missing, derive from level2 by chapter number.
-    let chapters = (level1Items || []).slice().sort((a, b) => a.page - b.page);
+function buildChapterRanges(level1Items, level2Items, mode) {
+    const useSections = mode === "section";
+    let chapters = (useSections ? (level2Items || []) : (level1Items || [])).slice().sort((a, b) => a.page - b.page);
 
-    if (!chapters.length && (level2Items || []).length) {
+    if (!chapters.length && !useSections && (level2Items || []).length) {
       const byChMin = new Map(); // ch -> min level2 page
       for (const it of level2Items) {
         const ch = String(it.number || "").split(".")[0];
@@ -467,22 +460,17 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return ranges;
   }
 
-  function chapterForBookPage(chapterRanges, bookPage) {
+function chapterForBookPage(chapterRanges, bookPage) {
     for (const r of chapterRanges) {
       if (r.start <= bookPage && bookPage <= r.end) return r.ch;
     }
     return null;
   }
 
-  /*
-  async function estimateBookToPhysicalOffset(pdf, totalPages, level1Items, tocEnd0, level2Items) {
+function estimateBookToPhysicalOffset(pageTexts, totalPages, level1Items, tocEnd0, level2Items) {
     // Robust offset estimation:
     // 1) If level1 chapter-1 title exists, try matching it after TOC.
     // 2) Otherwise match multiple level2 titles (with known book pages) and take median offset.
-    function escapeRegExp(s) {
-      return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
     const startPhys = Math.min(totalPages, Math.max(1, (tocEnd0 || 0) + 2)); // past TOC
     const scanEnd = Math.min(totalPages, startPhys + 260);
 
@@ -493,12 +481,12 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
       const reNeedle = new RegExp("\\b" + escapeRegExp(ch1.number) + "\\s+" + escapeRegExp(titlePrefix), "i");
 
       for (let p = startPhys; p <= scanEnd; p++) {
-        const txt = await getPageText(pdf, p);
+        const txt = pageTexts[p] || "";
         if (!txt) continue;
         if (txt.indexOf(title) > -1 && reNeedle.test(txt)) return p - ch1.page;
       }
       for (let p = startPhys; p <= scanEnd; p++) {
-        const txt = await getPageText(pdf, p);
+        const txt = pageTexts[p] || "";
         if (txt && txt.indexOf(title) > -1) return p - ch1.page;
       }
     }
@@ -514,7 +502,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
       const it = cands[i];
       const title = it.title.trim();
       for (let p = startPhys; p <= scanEnd; p++) {
-        const txt = await getPageText(pdf, p);
+        const txt = pageTexts[p] || "";
         if (txt && txt.indexOf(title) > -1) {
           offsets.push(p - it.page);
           break;
@@ -527,9 +515,64 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     offsets.sort((a, b) => a - b);
     return offsets[Math.floor(offsets.length / 2)];
   }
-  */
 
-  function extractTermsFromTocTitles(level2Items, dropExact) {
+async function buildPhysicalToBookMap(pdf, totalPages, pageTexts, level1Items, level2Items, tocEnd0) {
+    const physicalToBook = new Array(totalPages + 1).fill(null);
+    let source = "fallback";
+    let offset = 0;
+
+    try {
+      if (typeof pdf.getPageLabels === 'function') {
+        const labels = await pdf.getPageLabels();
+        if (labels && labels.length) {
+          let numericCount = 0;
+          for (let p = 1; p <= totalPages; p++) {
+            const lab = labels[p - 1];
+            if (!lab) continue;
+            const mNum = String(lab).match(/^\s*(\d{1,6})\s*$/);
+            if (mNum) {
+              physicalToBook[p] = parseInt(mNum[1], 10);
+              numericCount++;
+            }
+          }
+          if (numericCount > 0) source = "labels";
+        }
+      }
+    } catch (e) {
+      source = "fallback";
+    }
+
+    if (source !== "labels") {
+      offset = estimateBookToPhysicalOffset(pageTexts, totalPages, level1Items, tocEnd0, level2Items);
+      for (let p = 1; p <= totalPages; p++) {
+        const bookPage = p - offset;
+        physicalToBook[p] = bookPage > 0 ? bookPage : null;
+      }
+    }
+
+    return { physicalToBook, source, offset };
+  }
+
+function logPageMapSummary(result) {
+    const physicalToBook = result.physicalToBook;
+    let firstPhys = null, firstBook = null, lastPhys = null, lastBook = null;
+    for (let p = 1; p < physicalToBook.length; p++) {
+      if (physicalToBook[p] != null) { firstPhys = p; firstBook = physicalToBook[p]; break; }
+    }
+    for (let p = physicalToBook.length - 1; p >= 1; p--) {
+      if (physicalToBook[p] != null) { lastPhys = p; lastBook = physicalToBook[p]; break; }
+    }
+
+    if (result.source === "labels") {
+      logPut("페이지 라벨 사용: 물리 " + firstPhys + "쪽 -> 본문 " + firstBook + " / 물리 " + lastPhys + "쪽 -> 본문 " + lastBook);
+      return;
+    }
+
+    logPut("페이지 라벨 없음: 오프셋 추정 사용(book_page = physical_page - " + result.offset + ")");
+    logPut("페이지 매핑: 물리 " + firstPhys + "쪽 -> 본문 " + firstBook + " / 물리 " + lastPhys + "쪽 -> 본문 " + lastBook);
+  }
+
+function extractTermsFromTocTitles(level2Items, dropExact) {
     const out = [];
     for (const it of level2Items) {
       const title = (it.title || "").trim();
@@ -546,7 +589,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return dedupeTerms(out, dropExact);
   }
 
-  async function extractTechTokensFromBody(pdf, totalPages, physicalToBook, dropExact) {
+function extractTechTokensFromBody(pageTexts, totalPages, physicalToBook, dropExact) {
     const tokens = new Map();
     const MAX_BODY_PAGES_FOR_TECH = Math.min(totalPages, 250);
 
@@ -554,7 +597,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
       const bookPage = physicalToBook[p];
       if (bookPage == null || bookPage <= 0) continue;
 
-      const txt = await getPageText(pdf, p);
+      const txt = pageTexts[p] || "";
       const found = txt.match(/\b[A-Za-z][A-Za-z0-9][A-Za-z0-9._\-\/]{1,28}\b/g) || [];
       for (const tok of found) {
         if (!tok) continue;
@@ -585,98 +628,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return out;
   }
 
-  async function extractKoreanPhrasesFromBody(pdf, totalPages, physicalToBook, DROP_EXACT) {
-    // 튜닝 파라미터(필요하면 숫자만 조절)
-    const MIN_COUNT = 3;     // 너무 희귀하면 잡음이 많음
-    const MAX_COUNT = 80;    // 너무 흔하면 색인 가치 낮음 (필요하면 120 등으로)
-    const MAX_TERMS = 600;   // 본문에서 뽑는 국문 후보 상한(너무 많으면 후처리 부담)
-
-    // 후보 수집: term -> { count, firstBookPage }
-    const stats = new Map();
-
-    // 한글 구(1단어 또는 2단어)만 후보로. (조사/기능어는 후단에서 제거)
-    // - 1단어: 한글 2~12자
-    // - 2단어: "한글2~10 + 공백 + 한글2~10"
-    const re = /[가-힣]{2,12}(?:\s+[가-힣]{2,10})?/g;
-
-    for (let physical = 1; physical <= totalPages; physical++) {
-      const bookPage = physicalToBook[physical];
-      if (bookPage == null || bookPage <= 0) continue;
-
-      const text = await getPageText(pdf, physical);
-      if (!text) continue;
-
-      // 페이지 단위 스캔
-      let m;
-      while ((m = re.exec(text)) !== null) {
-        let cand = m[0];
-
-        // 기본 정규화: 네 normalizeTerm이 이미 있다면 활용 권장
-        // normalizeTerm이 suffix 제거를 없앤 상태여야 함(너가 방금 그렇게 했다고 했지)
-        if (typeof normalizeTerm === "function") cand = normalizeTerm(cand);
-        else cand = String(cand || "").trim();
-
-        if (!cand) continue;
-        if (cand.length < 2 || cand.length > 60) continue;
-
-        // DROP_EXACT에 있는 건 제거 (예: "개요", "요약" 등)
-        if (DROP_EXACT && DROP_EXACT.has(cand)) continue;
-
-        // 끝 조사/어미로 끝나는 미완성 구 제거 (너가 강화한 함수)
-        if (typeof shouldDropTrailingParticle === "function" && shouldDropTrailingParticle(cand)) continue;
-
-        // “두 가지/몇 가지 측면” 같은 일반문구 필터가 있으면 여기서도 적용
-        if (typeof isGenericQuantifierPhrase === "function" && isGenericQuantifierPhrase(cand)) continue;
-
-        // “... 위한 / ... 다른” 같은 문장 조각 필터가 있으면 적용
-        if (typeof shouldDropDanglingModifier === "function" && shouldDropDanglingModifier(cand)) continue;
-
-        // 너무 흔한 "것", "수" 같은 단어를 1차로 줄이기 위한 간단 필터(선택)
-        // if (cand === "것" || cand === "수") continue;
-
-        // 집계
-        const prev = stats.get(cand);
-        if (!prev) {
-          stats.set(cand, { count: 1, first: bookPage });
-        } else {
-          prev.count++;
-          // first는 가장 이른 책 페이지 유지
-          if (bookPage < prev.first) prev.first = bookPage;
-        }
-      }
-
-      if (physical % 50 === 0) logPut("국문 후보 추출 진행: 물리 " + physical + "/" + totalPages);
-    }
-
-    // 빈도 기반 필터링 + first 등장 순 정렬
-    const filtered = [];
-    for (const [term, info] of stats.entries()) {
-      if (info.count < MIN_COUNT) continue;
-      if (info.count > MAX_COUNT) continue;
-
-      // 1단어인데 너무 일반적인 길이(2~3)만 남는 문제 방지(선택)
-      // if (!term.includes(" ") && term.length <= 2) continue;
-
-      filtered.push({ term, first: info.first, count: info.count });
-    }
-
-    // 먼저 등장한 순(실무 색인 페이지 붙이기 워크플로에 유리)
-    filtered.sort((a, b) => a.first - b.first || b.count - a.count || a.term.localeCompare(b.term, "ko-KR"));
-
-    // 상한 적용
-    const limited = filtered.slice(0, MAX_TERMS).map(x => x.term);
-
-    logPut(
-      "국문 후보 추출: 전체 " + stats.size +
-      "개 중 필터 후 " + filtered.length +
-      "개, 최종 채택 " + limited.length +
-      "개 (MIN " + MIN_COUNT + ", MAX " + MAX_COUNT + ")"
-    );
-
-    return limited;
-  }
-
-  async function extractKoreanFromParentheticalPairs(pdf, totalPages, physicalToBook, DROP_EXACT) {
+function extractKoreanFromParentheticalPairs(pageTexts, totalPages, physicalToBook, DROP_EXACT) {
     // 튜닝 파라미터
     const MIN_COUNT = 1;   // 괄호 병기는 1회만 나와도 용어일 확률 높음
     const MAX_COUNT = 120; // 너무 흔한 건 제외(필요하면 올리기)
@@ -696,7 +648,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
       const bookPage = physicalToBook[physical];
       if (bookPage == null || bookPage <= 0) continue;
 
-      const text = await getPageText(pdf, physical);
+      const text = pageTexts[physical] || "";
       if (!text) continue;
 
       // (A) 국문(영문)
@@ -706,11 +658,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
         let en = m[2];
         ko = normalizeTerm(ko);
 
-        if (!ko) continue;
-        if (DROP_EXACT && DROP_EXACT.has(ko)) continue;
-        if (typeof shouldDropTrailingParticle === "function" && shouldDropTrailingParticle(ko)) continue;
-        if (typeof isGenericQuantifierPhrase === "function" && isGenericQuantifierPhrase(ko)) continue;
-        if (typeof shouldDropDanglingModifier === "function" && shouldDropDanglingModifier(ko)) continue;
+        if (!isUsefulTerm(ko, DROP_EXACT)) continue;
 
         const prev = stats.get(ko);
         if (!prev) stats.set(ko, { count: 1, first: bookPage });
@@ -735,10 +683,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
         let ko = m[2];
         ko = normalizeTerm(ko);
 
-        if (ko && !(DROP_EXACT && DROP_EXACT.has(ko))
-            && !(typeof shouldDropTrailingParticle === "function" && shouldDropTrailingParticle(ko))
-            && !(typeof isGenericQuantifierPhrase === "function" && isGenericQuantifierPhrase(ko))
-            && !(typeof shouldDropDanglingModifier === "function" && shouldDropDanglingModifier(ko))) {
+        if (isUsefulTerm(ko, DROP_EXACT)) {
 
           const prev = stats.get(ko);
           if (!prev) stats.set(ko, { count: 1, first: bookPage });
@@ -781,7 +726,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return out;
   }
 
-  function splitTitleIntoCandidates(title) {
+function splitTitleIntoCandidates(title) {
     const t = title
       .replace(/[\/:;,\(\)\[\]<>「」『』“”"']/g, "|")
       .replace(/[-–—]/g, "|")
@@ -804,7 +749,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return cands;
   }
 
-  function normalizeTerm(term) {
+function normalizeTerm(term) {
     let t = String(term || "").trim();
     if (!t) return "";
 
@@ -820,7 +765,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return t;
   }
 
-  function dedupeTerms(terms, dropExact) {
+function dedupeTerms(terms, dropExact) {
     const seen = new Set();
     const out = [];
     for (const t of terms) {
@@ -834,21 +779,13 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return out;
   }
 
-  async function buildIndexLines(pdf, totalPages, terms, physicalToBook, chapterRanges, opts) {
+function buildIndexLines(pageTexts, totalPages, terms, physicalToBook, chapterRanges, opts) {
     const maxPagesPerTerm = opts.maxPagesPerTerm || 11;
     const onePagePerChapter = !!opts.onePagePerChapter;
 
     // Overlap-based dedupe: remove shorter terms that are mostly covered by a longer containing term.
     // Example: "원인 분석" -> removed if pages overlap heavily with "근본 원인 분석".
     const OVERLAP_THRESHOLD = 0.8;
-
-    logPut("본문 텍스트 캐시 생성 중...");
-    const pageTexts = new Array(totalPages + 1);
-    for (let p = 1; p <= totalPages; p++) {
-      pageTexts[p] = await getPageText(pdf, p);
-      if (p % 25 === 0) logPut("... " + p + "쪽 캐시 완료");
-    }
-    logPut("본문 텍스트 캐시 완료.");
 
     // 1) First pass: compute chosen pages for every term (after per-chapter compression and capping).
     const termToPages = new Map(); // term -> number[]
@@ -889,7 +826,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return lines;
   }
 
-  function dedupeTermsByContainmentAndOverlap(termsInOrder, termToPages, threshold) {
+function dedupeTermsByContainmentAndOverlap(termsInOrder, termToPages, threshold) {
     // Remove a term T_short if there exists T_long such that:
     // - T_long contains T_short as a substring
     // - overlap(pages(T_short), pages(T_long)) / pages(T_short) >= threshold
@@ -960,12 +897,12 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return removed;
   }
 
-  function findBookPagesForTerm(term, pageTexts, physicalToBook) {
+function findBookPagesForTerm(term, pageTexts, physicalToBook) {
     const pages = [];
     for (let p = 1; p < pageTexts.length; p++) {
       const txt = pageTexts[p];
       if (!txt) continue;
-      if (txt.indexOf(term) > -1) {
+      if (pageContainsTerm(txt, term)) {
         const bp = physicalToBook[p];
         if (bp != null && bp > 0) pages.push(bp);
       }
@@ -980,7 +917,40 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return out;
   }
 
-  async function getPageText(pdf, pageNum1) {
+function pageContainsTerm(pageText, term) {
+    const needle = normalizeTerm(term);
+    if (!needle) return false;
+    if (pageText.indexOf(needle) > -1) return true;
+
+    const normalizedPage = normalizeSearchText(pageText);
+    const normalizedNeedle = normalizeSearchText(needle);
+    if (normalizedPage.indexOf(normalizedNeedle) > -1) return true;
+
+    if (/[A-Za-z]/.test(needle)) {
+      const re = new RegExp("\\b" + escapeRegExp(normalizedNeedle) + "\\b", "i");
+      if (re.test(normalizedPage)) return true;
+    }
+
+    if (/[가-힣]/.test(needle) && /\s/.test(needle)) {
+      return normalizedPage.replace(/\s+/g, "").indexOf(normalizedNeedle.replace(/\s+/g, "")) > -1;
+    }
+
+    return false;
+  }
+
+function normalizeSearchText(text) {
+    return String(text || "")
+      .replace(/\u00ad/g, "")
+      .replace(/-\s+/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+function escapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+async function getPageText(pdf, pageNum1) {
     const page = await pdf.getPage(pageNum1);
     const tc = await page.getTextContent();
     const strs = [];
@@ -991,11 +961,11 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     return strs.join(" ");
   }
 
-  // -----------------------------
-  // Util funcs
-  // -----------------------------
+// -----------------------------
+// Util funcs
+// -----------------------------
 
-  function logPut(str) {
+function logPut(str) {
     const log = document.getElementById('log');
     if (!log) return;
 
@@ -1007,7 +977,7 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     log.scrollTop = log.scrollHeight;
   }
 
-  function getChapterCountOverride() {
+function getChapterCountOverride() {
     // Reads UI controls from index_generated.html (do not modify HTML).
     // If '챕터 수 수동 지정' is checked, uses that value as chapter count.
     const chk = document.getElementById('paramManualChapters');
@@ -1020,13 +990,3 @@ const m2 = left.match(/^(\d+\.\d+)\s+(.*)$/);
     }
     return null;
   }
-
-  function htmlEscape(str) {
-    return String(str || "")
-      .replace(/&/g, '&amp;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-  }
-}
