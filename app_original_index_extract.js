@@ -1,6 +1,8 @@
 // Original-book index extractor using pdf.js.
 // Current target: Manning Publications two-column index pages.
 
+import * as pdfjsLib from './pdfjs-5.4.530-dist/build/pdf.mjs';
+
 document.getElementById('fileInput').addEventListener('change', handleFileSelect);
 
 (function enableDragDrop() {
@@ -48,10 +50,9 @@ async function runPipeline(typedArray) {
   logPut();
 
   try {
-    const pdfjs = await waitForPdfJsLib();
     let pageBoxes = detectPdfBoxes(typedArray);
-    pdfjs.GlobalWorkerOptions.workerSrc = 'pdfjs-5.4.530-dist/build/pdf.worker.mjs';
-    const loadingTask = pdfjs.getDocument({ data: typedArray });
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdfjs-5.4.530-dist/build/pdf.worker.mjs';
+    const loadingTask = pdfjsLib.getDocument({ data: typedArray });
     const pdf = await loadingTask.promise;
     const labels = await readPageLabels(pdf);
     pageBoxes = await fillPageBoxFallback(pdf, pageBoxes);
@@ -104,27 +105,6 @@ async function runPipeline(typedArray) {
     OUTPUT.textContent = '오류: ' + (err && err.stack ? err.stack : String(err));
     sendCapture('error');
   }
-}
-
-function waitForPdfJsLib() {
-  if (globalThis.pdfjsLib) return Promise.resolve(globalThis.pdfjsLib);
-
-  return new Promise((resolve, reject) => {
-    let tries = 0;
-    const check = () => {
-      if (globalThis.pdfjsLib) {
-        resolve(globalThis.pdfjsLib);
-        return;
-      }
-      tries++;
-      if (tries >= 100) {
-        reject(new Error('pdf.js를 로드하지 못했음. original_index_extract.html을 다시 열어봐.'));
-        return;
-      }
-      setTimeout(check, 50);
-    };
-    check();
-  });
 }
 
 function sendCapture(status) {
