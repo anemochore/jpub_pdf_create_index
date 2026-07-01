@@ -1,7 +1,9 @@
 // Original-book index extractor using pdf.js.
 // Current target: Manning Publications two-column index pages.
 
-document.getElementById('fileInput').addEventListener('change', handleFileSelect);
+const fileInput = document.getElementById('fileInput');
+fileInput.addEventListener('change', handleFileSelect);
+enableFileInputWhenPdfJsIsReady();
 
 (function enableDragDrop() {
   const box = document.getElementById('fileInput');
@@ -48,9 +50,10 @@ async function runPipeline(typedArray) {
   logPut();
 
   try {
+    const pdfjs = getPdfJsLib();
     let pageBoxes = detectPdfBoxes(typedArray);
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdfjs-5.4.530-dist/build/pdf.worker.mjs';
-    const loadingTask = pdfjsLib.getDocument({ data: typedArray });
+    pdfjs.GlobalWorkerOptions.workerSrc = 'pdfjs-5.4.530-dist/build/pdf.worker.mjs';
+    const loadingTask = pdfjs.getDocument({ data: typedArray });
     const pdf = await loadingTask.promise;
     const labels = await readPageLabels(pdf);
     pageBoxes = await fillPageBoxFallback(pdf, pageBoxes);
@@ -103,6 +106,22 @@ async function runPipeline(typedArray) {
     OUTPUT.textContent = '오류: ' + (err && err.stack ? err.stack : String(err));
     sendCapture('error');
   }
+}
+
+function enableFileInputWhenPdfJsIsReady() {
+  if (globalThis.pdfjsLib) {
+    fileInput.disabled = false;
+    return;
+  }
+
+  document.addEventListener('pdfjs-ready', () => {
+    fileInput.disabled = false;
+  }, { once: true });
+}
+
+function getPdfJsLib() {
+  if (globalThis.pdfjsLib) return globalThis.pdfjsLib;
+  throw new Error('pdf.js가 아직 준비되지 않았음. 파일 선택창을 다시 열어봐.');
 }
 
 function sendCapture(status) {
