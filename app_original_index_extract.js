@@ -125,6 +125,8 @@ function getPdfJsLib() {
 }
 
 function sendCapture(status) {
+  if (window.location.protocol === 'file:') return;
+
   const output = document.getElementById('output')?.textContent || '';
   const log = document.getElementById('log')?.value || '';
   fetch('/__capture', {
