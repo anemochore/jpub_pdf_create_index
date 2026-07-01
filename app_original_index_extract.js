@@ -3,21 +3,6 @@
 
 document.getElementById('fileInput').addEventListener('change', handleFileSelect);
 
-(function enableSampleAutoload() {
-  const params = new URLSearchParams(window.location.search);
-  const sample = params.get('sample');
-  if (!sample) return;
-
-  const samples = {
-    manning: 'dev/manning/9781633436077TEXT.pdf',
-    trim: 'dev/재단선 있는 pdf/AI에이전트개발내지_(0527).pdf'
-  };
-  const url = samples[sample];
-  if (!url) return;
-
-  window.addEventListener('load', () => runPipelineFromUrl(url));
-})();
-
 (function enableDragDrop() {
   const box = document.getElementById('fileInput');
   if (!box) return;
@@ -55,23 +40,6 @@ function runPipelineForFile(f) {
   fileReader.onload = function() {
     runPipeline(new Uint8Array(this.result));
   };
-}
-
-async function runPipelineFromUrl(url) {
-  const OUTPUT = document.getElementById('output');
-  OUTPUT.textContent = '샘플 PDF 로드 중...';
-  logPut();
-  logPut('샘플 PDF 자동 로드: ' + url);
-
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
-    const buf = await res.arrayBuffer();
-    await runPipeline(new Uint8Array(buf));
-  } catch (err) {
-    OUTPUT.textContent = '샘플 PDF 로드 오류: ' + (err && err.stack ? err.stack : String(err));
-    sendCapture('sample-load-error');
-  }
 }
 
 async function runPipeline(typedArray) {
