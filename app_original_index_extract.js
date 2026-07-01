@@ -1,8 +1,6 @@
 // Original-book index extractor using pdf.js.
 // Current target: Manning Publications two-column index pages.
 
-import * as pdfjsLib from './pdfjs-5.4.530-dist/build/pdf.mjs';
-
 document.getElementById('fileInput').addEventListener('change', handleFileSelect);
 
 (function enableDragDrop() {
