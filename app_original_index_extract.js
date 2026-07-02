@@ -373,7 +373,7 @@ async function readPageLayout(pdf, pageNum) {
 
 function groupItemsIntoLines(items, pageWidth) {
   const buckets = [];
-  const THRESHOLD_Y = 2.4;
+  const THRESHOLD_Y = 3.2;
 
   for (const item of items) {
     let bucket = null;
